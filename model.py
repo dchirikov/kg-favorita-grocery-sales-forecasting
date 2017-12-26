@@ -13,7 +13,8 @@ class RNNModel(object):
                 starter_learning_rate=0.0005, clip_gradients=1.,
                 path_to_store='log',
                 output_droupouts_kp=[.7, .7, .9, 1., 1.],
-                encoder_dropout_kp=0.7, decoder_dropout_kp=0.7):
+                encoder_dropout_kp=0.7, decoder_dropout_kp=0.7,
+                conv_dropout_kp=.7):
 
         self.history = history
         self.n_ts_attr = n_ts_attr
@@ -31,6 +32,7 @@ class RNNModel(object):
         self.encoder_dropout_kp = encoder_dropout_kp
         self.decoder_dropout_kp = decoder_dropout_kp
         self.output_droupouts_kp = output_droupouts_kp
+        self.conv_dropout_kp = conv_dropout_kp
 
         self.starter_learning_rate = starter_learning_rate
 
@@ -205,6 +207,9 @@ class RNNModel(object):
         self.t_decoder_dropout_kp = tf.placeholder(
             tf.float32, name="dec_dropout")
 
+        self.t_conv_dropout_kp = tf.placeholder(
+            tf.float32, name="conv_dropout")
+
         self.t_lr = tf.placeholder(
             tf.float32, [],  name="learning_rate")
 
@@ -212,6 +217,9 @@ class RNNModel(object):
 
         self.NWRMSLE = tf.placeholder(tf.float32, name="NWRMSLE")
         tf.summary.scalar('NWRMSLE', self.NWRMSLE)
+
+        self.NWRMSLE_5 = tf.placeholder(tf.float32, name="NWRMSLE_5")
+        tf.summary.scalar('NWRMSLE_5', self.NWRMSLE_5)
 
         self.saver = tf.train.Saver()
 
@@ -221,11 +229,11 @@ class RNNModel(object):
     def initiate_embeddings(self, d_items=20, d_stores=3):
 
         self.emb_feat_item_nbr_vars = tf.Variable(
-            tf.random_uniform([2134244, d_items])
+            tf.random_uniform([2134244+1, d_items])
         )
 
         self.emb_feat_store_nbr_vars = tf.Variable(
-            tf.random_uniform([54, d_stores])
+            tf.random_uniform([54+1, d_stores])
         )
 
     def convert_inputs(self, t_ts_inputs, t_items_features):
@@ -275,7 +283,8 @@ class RNNModel(object):
         return t_encoder_state
 
 
-    def output_layers(self, t_predictions,  t_y_day_attr, concatenated_emb):
+    def output_layers(self, t_predictions,  t_y_day_attr,
+            concatenated_emb, conv_result):
 
         with tf.name_scope('output_layers'):
 
@@ -287,7 +296,8 @@ class RNNModel(object):
                 [
                     t_predictions,
                     t_y_day_attr,
-                    concatenated_emb
+                    concatenated_emb,
+                    conv_result
                 ],
                 axis=1
             )
@@ -336,10 +346,10 @@ class RNNModel(object):
             t_output = tf.layers.dense(
                 t_output,
                 n_input,
-                activation=self.output_activation,
-                kernel_initializer=tf.random_normal_initializer(
-                    stddev=np.sqrt(1 / n_input),
-                )
+                #activation=self.output_activation,
+                #kernel_initializer=tf.random_normal_initializer(
+                #    stddev=np.sqrt(1 / n_input),
+                #)
             )
 
         return t_output
@@ -407,15 +417,101 @@ class RNNModel(object):
                 t_X[:, -1, :1], # last day
             )
 
+        conv_result = self.conv(t_X)
+
         concatenated_emb = self.embeddings(
             t_feat_store_nbr, t_feat_item_nbr)
 
         t_predictions = self.output_layers(
             t_decoder_predictions,  t_y_day_attr,
-            concatenated_emb
+            concatenated_emb, conv_result
         )
 
         return t_predictions
+
+    def conv(self, X):
+
+        def flatten(x_tensor):
+            tlen = 1
+            for i in x_tensor.shape.as_list()[1:]:
+                tlen *= i
+            return tf.reshape(x_tensor, [-1, tlen])
+
+        X = tf.expand_dims(X, 3)
+
+        X = tf.contrib.layers.conv2d(
+            X, 7,
+            (3, self.n_ts_attr),
+            (1, self.n_ts_attr),
+            'SAME'
+        )
+
+        X = tf.contrib.layers.max_pool2d(
+            X,
+            (2, self.n_ts_attr),
+            (2, self.n_ts_attr),
+            'SAME'
+        )
+
+        X = tf.nn.dropout(X, self.t_conv_dropout_kp)
+
+        X = tf.contrib.layers.conv2d(
+            X, 21,
+            (3, self.n_ts_attr),
+            (1, self.n_ts_attr),
+            'SAME'
+        )
+
+        X = tf.contrib.layers.max_pool2d(
+            X,
+            (2, self.n_ts_attr),
+            (2, self.n_ts_attr),
+            'SAME'
+        )
+
+        X = tf.nn.dropout(X, self.t_conv_dropout_kp)
+
+        X = tf.contrib.layers.conv2d(
+            X, 365,
+            (3, self.n_ts_attr),
+            (1, self.n_ts_attr),
+            'SAME'
+        )
+
+        X = tf.contrib.layers.max_pool2d(
+            X,
+            (2, self.n_ts_attr),
+            (2, self.n_ts_attr),
+            'SAME'
+        )
+
+
+        X = flatten(X)
+
+        X = tf.nn.dropout(X, self.t_conv_dropout_kp)
+
+        n_input = 1000
+        X = tf.layers.dense(
+            X,
+            n_input,
+            activation=tf.nn.selu,
+            kernel_initializer=tf.random_normal_initializer(
+                stddev=np.sqrt(1 / n_input),
+            )
+        )
+
+        n_input = self.n_days_predict
+        X = tf.layers.dense(
+            X,
+            n_input,
+            activation=tf.nn.selu,
+            kernel_initializer=tf.random_normal_initializer(
+                stddev=np.sqrt(1 / n_input),
+            )
+        )
+
+        return X
+
 
     def embeddings(self, t_feat_store_nbr, t_feat_item_nbr):
 
@@ -444,18 +540,28 @@ class RNNModel(object):
 
     def get_train_op(self, loss):
 
+        def lr_decay(lr, gs):
+
+            lr = tf.train.exponential_decay(
+                lr, gs,
+                1000, 0.95,
+                staircase=True
+            )
+            return lr
+
         update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
         with tf.control_dependencies(update_ops):
             train_op = tf.contrib.layers.optimize_loss(
                 loss, self.global_step,
                 self.starter_learning_rate,
-                optimizer='Adam',
-                #learning_rate_decay_fn=lr_decay,
+                optimizer=lambda lr: tf.train.MomentumOptimizer(lr, momentum=0.9),
+                #optimizer='Adam',
+                #optimizer=lambda lr: tf.train.AdamOptimizer(lr, epsilon=0.0001),
+                learning_rate_decay_fn=lr_decay,
                 clip_gradients=self.clip_gradients,
                 #summaries=["gradients"]
             )
             return train_op
-
 
     def get_input_data(self, train_batch_gen):
         def gen():
@@ -510,7 +616,7 @@ class RNNModel(object):
 
         )
         validation_dataset = validation_dataset.prefetch(512*420)
-        validation_dataset = validation_dataset.batch(512*80)
+        validation_dataset = validation_dataset.batch(512*20)
 
         iterator = tf.data.Iterator.from_structure(
             train_dataset.output_types,
@@ -592,6 +698,8 @@ class RNNModel(object):
 
 
         NWRMSLE = .6 # just for convenience
+        NWRMSLE_5 = .6 # just for convenience
+        last_mean = 10.
 
         with self.train_graph.as_default():
             self.sess.run(self.training_iterator)
@@ -607,8 +715,10 @@ class RNNModel(object):
                         feed_dict={
                             self.t_is_training: True,
                             self.NWRMSLE: NWRMSLE,
+                            self.NWRMSLE_5: NWRMSLE_5,
                             self.t_encoder_dropout_kp: self.encoder_dropout_kp,
                             self.t_decoder_dropout_kp: self.decoder_dropout_kp,
+                            self.t_conv_dropout_kp: self.conv_dropout_kp,
                             self.t_output_droupouts_kp: self.output_droupouts_kp,
                         }
                     )
@@ -627,6 +737,7 @@ class RNNModel(object):
                 if g_step % report_every == 0:
 
                     losses = np.array(losses)
+                    last_mean = losses.mean()
                     print("g_step: {} loss std/mean: {} {}".format(
                             g_step, losses.std(), losses.mean()))
                     if hd_exp is not None:
@@ -636,6 +747,7 @@ class RNNModel(object):
 
 
                 if g_step % validate_every == 0:
+                    #and last_mean < 1.:
                     print("\tValidation", end='\r', flush=True)
                     #self.sess.run(self.validation_iterator)
 
@@ -665,6 +777,7 @@ class RNNModel(object):
                         self.v_t_feat_class: v_class,
                         self.t_encoder_dropout_kp: 1.,
                         self.t_decoder_dropout_kp: 1.,
+                        self.t_conv_dropout_kp: 1.,
                         self.t_output_droupouts_kp: [1., 1., 1., 1., 1.],
                         self.t_is_training: False,
                     }
@@ -717,6 +830,8 @@ class RNNModel(object):
 
                         if hd_exp is not None:
                             hd_exp.metric("Validation NWRMSLE_5", NWRMSLE_5)
+
+                    self.saver.save(self.sess, self.path + "/model.ckpt", global_step=g_step)
 
                     self.sess.run(self.training_iterator)
 
