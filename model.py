@@ -8,17 +8,20 @@ class RNNModel(object):
     def __init__(self, history=200, n_ts_attr=12, n_attr=397,
                 batch_size=512,
                 n_days_predict=16,
+                n_classes=100,
                 #max_source_length=400,
                 n_layers_rnn=2, rnn_size_encoder=200, rnn_size_decoder=200,
                 starter_learning_rate=0.0005, clip_gradients=1.,
                 path_to_store='log',
                 output_droupouts_kp=[.7, .7, .9, 1., 1.],
                 encoder_dropout_kp=0.7, decoder_dropout_kp=0.7,
-                conv_dropout_kp=.7):
+                conv_dropout_kp=.7,
+                bin_weights=None):
 
         self.history = history
         self.n_ts_attr = n_ts_attr
         self.n_attr = n_attr
+        self.n_classes = n_classes
         self.n_days_predict = n_days_predict
         self.batch_size = batch_size
 
@@ -33,6 +36,13 @@ class RNNModel(object):
         self.decoder_dropout_kp = decoder_dropout_kp
         self.output_droupouts_kp = output_droupouts_kp
         self.conv_dropout_kp = conv_dropout_kp
+
+        if bin_weights is not None:
+            self.bin_weights = bin_weights
+        else:
+            self.bin_weights = np.ones(self.n_classes)
+
+        self.bin_weights = self.bin_weights.astype(np.float32)
 
         self.starter_learning_rate = starter_learning_rate
 
@@ -68,7 +78,7 @@ class RNNModel(object):
 
         self.t_y = tf.placeholder(
             tf.float32,
-            [None, self.n_days_predict],
+            [None, self.n_days_predict, self.n_classes],
             name="t_y"
         )
 
@@ -138,7 +148,7 @@ class RNNModel(object):
 
         self.v_t_y = tf.placeholder(
             tf.float32,
-            [None, self.n_days_predict],
+            [None, self.n_days_predict, self.n_classes],
             name="v_t_y"
         )
 
@@ -213,6 +223,10 @@ class RNNModel(object):
         self.t_lr = tf.placeholder(
             tf.float32, [],  name="learning_rate")
 
+        self.t_bin_weights = tf.constant(
+            self.bin_weights, name="bin_weights"
+        )
+
         self.global_step = tf.Variable(0, name='global_step', trainable=False)
 
         self.NWRMSLE = tf.placeholder(tf.float32, name="NWRMSLE")
@@ -283,10 +297,10 @@ class RNNModel(object):
         return t_encoder_state
 
 
-    def output_layers(self, t_predictions,  t_y_day_attr,
+    def output_layers(self, day, t_predictions,  t_y_day_attr,
             concatenated_emb, conv_result):
 
-        with tf.name_scope('output_layers'):
+        with tf.name_scope('output_layers_{}'.format(day)):
 
             t_y_day_attr = tf.to_float(
                 tf.reshape(t_y_day_attr, shape=[-1, 11*self.n_days_predict])
@@ -342,17 +356,19 @@ class RNNModel(object):
 
             t_output = tf.nn.dropout(t_output, self.t_output_droupouts_kp[3])
 
-            n_input = self.n_days_predict
+            #n_input = self.n_days_predict
+            n_input = self.n_classes
             t_output = tf.layers.dense(
                 t_output,
                 n_input,
+                activation=None
                 #activation=self.output_activation,
                 #kernel_initializer=tf.random_normal_initializer(
                 #    stddev=np.sqrt(1 / n_input),
                 #)
             )
 
-        return t_output
+        return t_output*self.t_bin_weights
 
     def decoder(self, t_encoder_state, last_value):
         """
@@ -422,10 +438,16 @@ class RNNModel(object):
         concatenated_emb = self.embeddings(
             t_feat_store_nbr, t_feat_item_nbr)
 
-        t_predictions = self.output_layers(
-            t_decoder_predictions,  t_y_day_attr,
-            concatenated_emb, conv_result
-        )
+        t_predictions = []
+        for day in range(self.n_days_predict):
+            day_classes = self.output_layers(
+                day+1,
+                t_decoder_predictions,  t_y_day_attr,
+                concatenated_emb, conv_result
+            )
+            t_predictions.append(day_classes)
+
+        t_predictions = tf.stack(t_predictions, axis=1)
 
         return t_predictions
 
@@ -532,11 +554,30 @@ class RNNModel(object):
         return concatenated_emb
 
     def get_loss(self, t_targets, t_predictions ):
-        loss = tf.losses.mean_squared_error(
-            labels=t_targets, predictions=t_predictions)
+        #loss = tf.losses.mean_squared_error(
+        #    labels=t_targets, predictions=t_predictions)
+        loss = tf.reduce_mean(
+            tf.nn.softmax_cross_entropy_with_logits(
+                labels=t_targets,
+                logits=t_predictions,
+            )
+        )
         tf.summary.scalar('loss', loss)
 
         return loss
+
+    def get_one_hot(self, t_predictions):
+
+        softmax = tf.nn.softmax(t_predictions)
+        top_idx = tf.nn.top_k(softmax).indices
+        top_idx = tf.squeeze(top_idx, 2)
+
+        oh = tf.one_hot(
+            top_idx,
+            tf.shape(softmax)[2]
+        )
+
+        return oh
 
     def get_train_op(self, loss):
 
@@ -584,7 +625,7 @@ class RNNModel(object):
             output_shapes=(
                 tf.TensorShape([self.history, self.n_ts_attr]),
                 tf.TensorShape([self.n_days_predict, self.n_ts_attr-1]),
-                tf.TensorShape([self.n_days_predict]),
+                tf.TensorShape([self.n_days_predict, self.n_classes]),
                 tf.TensorShape([]),
                 tf.TensorShape([]),
                 tf.TensorShape([]),
@@ -663,6 +704,8 @@ class RNNModel(object):
 
             self.loss = self.get_loss(self.t_y, self.t_predictions)
 
+            self.one_hot_predictions = self.get_one_hot(self.t_predictions)
+
             self.train_op = self.get_train_op(self.loss)
 
             self.summary_merged = tf.summary.merge_all()
@@ -694,6 +737,7 @@ class RNNModel(object):
             yield X1[idxes], X2[idxes], X3[idxes], y[idxes]
 
     def train(self, validation_set, coef, sum_W,
+            oh_enc, sales_max, sales_min, nbins,
             report_every=100, validate_every=1000, hd_exp=None):
 
 
@@ -755,12 +799,12 @@ class RNNModel(object):
                     real_unit_sales= None
 
                     (
-                        v_X, y_day_attr, v_y,
+                        v_X, y_day_attr, v_y, y_values,
                         v_store_nbr, v_n_city, v_n_state, n_type,
                         v_cluster, v_item_nbr, v_n_family, v_class
                     ) = validation_set
 
-                    real_unit_sales = v_y
+                    real_unit_sales = y_values
 
                     feed_dict = {
 
@@ -789,7 +833,7 @@ class RNNModel(object):
                         try:
                             predictions.append(
                                 self.sess.run(
-                                    self.t_predictions,
+                                    self.one_hot_predictions,
                                     feed_dict=feed_dict
                                 )
                             )
@@ -798,9 +842,14 @@ class RNNModel(object):
 
                         except KeyboardInterrupt:
                             print("Ctrl+C")
-                            break
+                            return predictions
 
                     predicted_val = np.vstack(predictions)
+
+
+                    predicted_val = self.from_oh_to_values(
+                        predicted_val, oh_enc, sales_max, sales_min, nbins
+                    )
 
                     NWRMSLE = (
                         np.sqrt(
@@ -837,6 +886,21 @@ class RNNModel(object):
 
             if hd_exp is not None:
                 hd_exp.end()
+
+        return predictions
+
+
+    def from_oh_to_values(self, df, oh_enc, sales_max, sales_min, nbins):
+        d1, d2, d3 = df.shape
+
+        values = ((
+            oh_enc.inverse_transform(
+                np.reshape(df, [d1*d2, d3])
+            ) - 1)
+        )*(sales_max - sales_min)/nbins + sales_min
+
+        return np.reshape(values, [d1, d2])
+
 
     #def __del__(self):
     #    pass
