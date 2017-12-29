@@ -79,25 +79,25 @@ class RNNModel(object):
         )
 
         self.t_feat_n_city = tf.placeholder(
-            tf.int8,
+            tf.int32,
             [None],
             name="t_feat_n_city"
         )
 
         self.t_feat_n_state = tf.placeholder(
-            tf.int8,
+            tf.int32,
             [None],
             name="t_feat_n_state"
         )
 
         self.t_feat_n_type = tf.placeholder(
-            tf.int8,
+            tf.int32,
             [None],
             name="t_feat_n_type"
         )
 
         self.t_feat_cluster = tf.placeholder(
-            tf.int8,
+            tf.int32,
             [None],
             name="t_feat_cluster"
         )
@@ -109,13 +109,13 @@ class RNNModel(object):
         )
 
         self.t_feat_n_family = tf.placeholder(
-            tf.int8,
+            tf.int32,
             [None],
             name="t_feat_n_family"
         )
 
         self.t_feat_class = tf.placeholder(
-            tf.int16,
+            tf.int32,
             [None],
             name="t_feat_class"
         )
@@ -149,25 +149,25 @@ class RNNModel(object):
         )
 
         self.v_t_feat_n_city = tf.placeholder(
-            tf.int8,
+            tf.int32,
             [None],
             name="v_t_feat_n_city"
         )
 
         self.v_t_feat_n_state = tf.placeholder(
-            tf.int8,
+            tf.int32,
             [None],
             name="v_t_feat_n_state"
         )
 
         self.v_t_feat_n_type = tf.placeholder(
-            tf.int8,
+            tf.int32,
             [None],
             name="v_t_feat_n_type"
         )
 
         self.v_t_feat_cluster = tf.placeholder(
-            tf.int8,
+            tf.int32,
             [None],
             name="v_t_feat_cluster"
         )
@@ -179,13 +179,13 @@ class RNNModel(object):
         )
 
         self.v_t_feat_n_family = tf.placeholder(
-            tf.int8,
+            tf.int32,
             [None],
             name="v_t_feat_n_family"
         )
 
         self.v_t_feat_class = tf.placeholder(
-            tf.int16,
+            tf.int32,
             [None],
             name="v_t_feat_class"
         )
@@ -226,14 +226,23 @@ class RNNModel(object):
         return True
         #return t_ts_inputs, t_items_features, t_days_features, t_targets,
 
-    def initiate_embeddings(self, d_items=20, d_stores=3):
+    def initiate_embeddings(self, d_items=20, d_stores=3,
+            d_n_family=2, d_class=3):
+
+        self.emb_feat_store_nbr_vars = tf.Variable(
+            tf.random_uniform([54+1, d_stores])
+        )
 
         self.emb_feat_item_nbr_vars = tf.Variable(
             tf.random_uniform([2134244+1, d_items])
         )
 
-        self.emb_feat_store_nbr_vars = tf.Variable(
-            tf.random_uniform([54+1, d_stores])
+        self.emb_feat_n_family_vars = tf.Variable(
+            tf.random_uniform([32+1, d_n_family])
+        )
+
+        self.emb_feat_class_vars = tf.Variable(
+            tf.random_uniform([254+1, d_class])
         )
 
     def convert_inputs(self, t_ts_inputs, t_items_features):
@@ -283,21 +292,20 @@ class RNNModel(object):
         return t_encoder_state
 
 
-    def output_layers(self, t_predictions,  t_y_day_attr,
-            concatenated_emb, conv_result):
+    def output_layers(self, t_predictions, conv_result,
+            concatenated_emb):
 
         with tf.name_scope('output_layers'):
 
-            t_y_day_attr = tf.to_float(
-                tf.reshape(t_y_day_attr, shape=[-1, 11*self.n_days_predict])
-            )
+            #t_y_day_attr = tf.to_float(
+            #    tf.reshape(t_y_day_attr, shape=[-1, 11*self.n_days_predict])
+            #)
 
             t_concat = tf.concat(
                 [
                     t_predictions,
-                    t_y_day_attr,
+                    conv_result,
                     concatenated_emb,
-                    conv_result
                 ],
                 axis=1
             )
@@ -354,7 +362,8 @@ class RNNModel(object):
 
         return t_output
 
-    def decoder(self, t_encoder_state, last_value):
+    def decoder(self, t_encoder_state, last_value,
+            t_y_day_attr, conv, concatenated_emb):
         """
         :param encoder_state: shape [batch_size, encoder_rnn_depth]
         :param days_features: shape [batch_size, time_to_predict, n_features-1]
@@ -384,7 +393,19 @@ class RNNModel(object):
             return time < self.n_days_predict
 
         def loop_body(time, prev_output, prev_decoder_state, array_y):
-            t_output, t_state = dec_multicell(prev_output, prev_decoder_state)
+            #conv_res = conv[:, time]
+            #conv_res = tf.expand_dims(conv_res, -1)
+            day_attr = tf.cast(t_y_day_attr[:, time], tf.float32)
+            next_input = tf.concat(
+                [
+                    prev_output,
+                    day_attr,
+                    conv,
+                    concatenated_emb
+                ],
+                axis=1
+            )
+            t_output, t_state = dec_multicell(next_input, prev_decoder_state)
             t_output = dense_layer(t_output)
             #t_output = self.output_layers(
             #    t_output,
@@ -404,30 +425,42 @@ class RNNModel(object):
         y = y.stack()
         y = tf.squeeze(y, axis=-1)
         y = tf.transpose(y)
+        #y = tf.transpose(y, perm=[1,0,2])
+        #print(y.shape)
+        #y = tf.reshape(y, [-1, 21, self.n_days_predict])
+        #y = self.output_conv(y)
         y = tf.reshape(y, [-1, self.n_days_predict])
         return y
 
-    def predict(self, t_X, t_y_day_attr, t_feat_store_nbr, t_feat_item_nbr):
+    def predict(self, t_X, t_y_day_attr, t_feat_store_nbr, t_feat_item_nbr,
+                t_feat_n_family, t_feat_class):
 
         t_encoder_state = self.encoder(t_X)
-
-        with tf.name_scope('decoder') as scope:
-            t_decoder_predictions = self.decoder(
-                t_encoder_state,
-                t_X[:, -1, :1], # last day
-            )
 
         conv_result = self.conv(t_X)
 
         concatenated_emb = self.embeddings(
-            t_feat_store_nbr, t_feat_item_nbr)
-
-        t_predictions = self.output_layers(
-            t_decoder_predictions,  t_y_day_attr,
-            concatenated_emb, conv_result
+            t_feat_store_nbr, t_feat_item_nbr,
+            t_feat_n_family, t_feat_class
         )
 
-        return t_predictions
+        with tf.name_scope('decoder') as scope:
+            t_decoder_predictions = self.decoder(
+                t_encoder_state,
+                tf.squeeze(t_X[:, -1:, :1], axis=-1), # last day
+                t_y_day_attr,
+                conv_result,
+                concatenated_emb
+            )
+
+        #t_predictions = self.output_layers(
+        #    t_decoder_predictions,
+        #    conv_result,
+        #    concatenated_emb
+        #)
+
+        #return t_predictions
+        return t_decoder_predictions
 
     def conv(self, X):
 
@@ -513,7 +546,8 @@ class RNNModel(object):
         return X
 
 
-    def embeddings(self, t_feat_store_nbr, t_feat_item_nbr):
+    def embeddings(self, t_feat_store_nbr, t_feat_item_nbr,
+            t_feat_n_family, t_feat_class):
 
         emb_feat_item_nbr = tf.nn.embedding_lookup(
             self.emb_feat_item_nbr_vars, t_feat_item_nbr)
@@ -521,10 +555,20 @@ class RNNModel(object):
         emb_feat_store_nbr = tf.nn.embedding_lookup(
             self.emb_feat_store_nbr_vars, t_feat_store_nbr)
 
+        emb_feat_n_family = tf.nn.embedding_lookup(
+            self.emb_feat_n_family_vars, t_feat_n_family
+        )
+
+        emb_feat_class = tf.nn.embedding_lookup(
+            self.emb_feat_class_vars, t_feat_class
+        )
+
         concatenated_emb = tf.concat(
             [
                 emb_feat_item_nbr,
-                emb_feat_store_nbr
+                emb_feat_store_nbr,
+                emb_feat_n_family,
+                emb_feat_class
             ],
             axis=1
         )
@@ -554,8 +598,8 @@ class RNNModel(object):
             train_op = tf.contrib.layers.optimize_loss(
                 loss, self.global_step,
                 self.starter_learning_rate,
-                optimizer=lambda lr: tf.train.MomentumOptimizer(lr, momentum=0.9),
-                #optimizer='Adam',
+                #optimizer=lambda lr: tf.train.MomentumOptimizer(lr, momentum=0.9),
+                optimizer='Adam',
                 #optimizer=lambda lr: tf.train.AdamOptimizer(lr, epsilon=0.0001),
                 learning_rate_decay_fn=lr_decay,
                 clip_gradients=self.clip_gradients,
@@ -573,13 +617,13 @@ class RNNModel(object):
                 tf.int8,    # y_day_attr
                 tf.float32, # y
                 tf.int32,   # store_nbr
-                tf.int8,    # n_city
-                tf.int8,    # n_state
-                tf.int8,    # n_type
-                tf.int8,    # cluster
+                tf.int32,   # n_city
+                tf.int32,   # n_state
+                tf.int32,   # n_type
+                tf.int32,   # cluster
                 tf.int32,   # item_nbr
-                tf.int8,    # n_family
-                tf.int16,   # class
+                tf.int32,   # n_family
+                tf.int32,   # class
             ),
             output_shapes=(
                 tf.TensorShape([self.history, self.n_ts_attr]),
@@ -657,7 +701,9 @@ class RNNModel(object):
             self.t_predictions = self.predict(
                 self.t_X, self.t_y_day_attr,
                 self.t_feat_store_nbr,
-                self.t_feat_item_nbr
+                self.t_feat_item_nbr,
+                self.t_feat_n_family,
+                self.t_feat_class
             )
             #    self.t_days_features, self.t_items_features)
 
