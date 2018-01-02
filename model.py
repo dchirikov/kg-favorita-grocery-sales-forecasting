@@ -776,8 +776,8 @@ class RNNModel(object):
             yield X1[idxes], X2[idxes], X3[idxes], y[idxes]
 
     def train(self, validation_set, coef, sum_W,
-            report_every=100, validate_every=1000, hd_exp=None,
-            checkpoint=None):
+            report_every=100, validate_every=1000, save_every=2000,
+            hd_exp=None, checkpoint=None):
 
 
         NWRMSLE = .6 # just for convenience
@@ -837,8 +837,11 @@ class RNNModel(object):
                         hd_exp.metric("Loss mean", losses.mean())
                     losses = []
 
+                if g_step % save_every == 0:
 
-                if g_step % validate_every == 0:
+                    self.saver.save(self.sess, self.path + "/model.ckpt", global_step=g_step)
+
+                if validate_every > 0 and g_step % validate_every == 0:
                     #and last_mean < 1.:
                     print("\tValidation", end='\r', flush=True)
                     #self.sess.run(self.validation_iterator)
@@ -922,8 +925,6 @@ class RNNModel(object):
 
                         if hd_exp is not None:
                             hd_exp.metric("Validation NWRMSLE_5", NWRMSLE_5)
-
-                    self.saver.save(self.sess, self.path + "/model.ckpt", global_step=g_step)
 
                     self.sess.run(self.training_iterator)
 
