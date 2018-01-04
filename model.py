@@ -125,6 +125,12 @@ class RNNModel(object):
                 name="feat_class"
             )
 
+            self.v_t_weights = tf.placeholder(
+                tf.float32,
+                [None],
+                name="weights"
+            )
+
         #
         # validation inputs
         #
@@ -196,6 +202,12 @@ class RNNModel(object):
                 name="feat_class"
             )
 
+            self.v_t_weights = tf.placeholder(
+                tf.float32,
+                [None],
+                name="weights"
+            )
+
         # =====================
 
         #self.t_sequence_length = tf.placeholder_with_default(
@@ -230,7 +242,7 @@ class RNNModel(object):
         return True
         #return t_ts_inputs, t_items_features, t_days_features, t_targets,
 
-    def initiate_embeddings(self, d_items=20, d_stores=3,
+    def initiate_embeddings(self, d_items=5, d_stores=3,
             d_n_family=2, d_class=3):
 
 
@@ -593,9 +605,17 @@ class RNNModel(object):
 
         return concatenated_emb
 
-    def get_loss(self, t_targets, t_predictions ):
+    def get_loss(self, t_targets, t_predictions, t_weights):
+
+        t_weights = tf.expand_dims(t_weights, -1)
+
+        #t_weights = tf.tile(
+        #    t_weights, [1, self.n_days_predict]
+        #)
+
         loss = tf.losses.mean_squared_error(
-            labels=t_targets, predictions=t_predictions)
+            labels=t_targets, predictions=t_predictions,
+            weights=t_weights)
         tf.summary.scalar('loss', loss)
 
         return loss
@@ -654,11 +674,13 @@ class RNNModel(object):
                 tf.int32,   # item_nbr
                 tf.int32,   # n_family
                 tf.int32,   # class
+                tf.float32, # weights
             ),
             output_shapes=(
                 tf.TensorShape([self.history, self.n_ts_attr]),
                 tf.TensorShape([self.n_days_predict, self.n_ts_attr-1]),
                 tf.TensorShape([self.n_days_predict]),
+                tf.TensorShape([]),
                 tf.TensorShape([]),
                 tf.TensorShape([]),
                 tf.TensorShape([]),
@@ -686,6 +708,7 @@ class RNNModel(object):
                 self.v_t_feat_item_nbr,
                 self.v_t_feat_n_family,
                 self.v_t_feat_class,
+                self.v_t_weights,
             )
 
         )
@@ -722,7 +745,8 @@ class RNNModel(object):
                 self.t_feat_store_nbr, self.t_feat_n_city,
                 self.t_feat_n_state, self.t_feat_n_type,
                 self.t_feat_cluster, self.t_feat_item_nbr,
-                self.t_feat_n_family, self.t_feat_class
+                self.t_feat_n_family, self.t_feat_class,
+                self.t_weights,
             ) = self.get_input_data(train_batch_gen)
 
             #t_inputs_norm = self.convert_inputs(
@@ -741,7 +765,8 @@ class RNNModel(object):
 
             #    self.t_days_features, self.t_items_features)
 
-            self.loss = self.get_loss(self.t_y, self.t_predictions)
+            self.loss = self.get_loss(
+                self.t_y, self.t_predictions, self.t_weights)
 
             self.train_op = self.get_train_op(self.loss)
 
@@ -828,7 +853,7 @@ class RNNModel(object):
 
                 if g_step % report_every == 0:
 
-                    losses = np.array(losses)
+                    losses = np.sqrt(np.array(losses))
                     last_mean = losses.mean()
                     print("g_step: {} loss std/mean: {} {}".format(
                             g_step, losses.std(), losses.mean()))
